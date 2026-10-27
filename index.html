@@ -36,14 +36,21 @@
       const messagesList = document.getElementById("messages-list");
       const paraText = document.getElementById("para-text");
 
+      // Client-side heartbeat settings
+      const PING_EVERY = 25_000; // send an app-level ping this often
+      const PONG_TIMEOUT = 10_000; // no reply within this → server is gone
+
+      let pingTimer = null;
+      let pongTimer = null;
+
       let connection = null;
 
       socketConnectButton.addEventListener("click", () => {
         const { port } = window.location;
 
         // close if there is any open connection first
-        if(connection) {
-            connection.close();
+        if (connection) {
+          dropConnection(connection);
         }
 
         connection = new WebSocket(`ws://localhost:${port}`);
@@ -55,12 +62,19 @@
         };
 
         connection.onmessage = (event) => {
+          // any message from the server proves it is alive:
+          clearTimeout(pongTimer);
+
           console.log("Message received:", event.data);
 
-          const li = document.createElement("li");
-          li.innerText = event.data;
+          const msg = JSON.parse(event.data);
+          if (msg.type === "pong") return; // heartbeat reply, nothing to show
 
-          messagesList.appendChild(li);
+          if (msg.type === "chat") {
+            const li = document.createElement("li");
+            li.innerText = msg.text;
+            messagesList.appendChild(li);
+          }
         };
 
         connection.onerror = (error) => {
@@ -69,6 +83,7 @@
 
         connection.onclose = () => {
           console.log("WebSocket disconnected");
+          stopHeartbeat();
           paraText.innerText = "WebSocket disconnected";
           paraText.style.color = "red";
         };
@@ -88,9 +103,42 @@
 
         paraText.innerText = "";
 
-        connection.send(messageInput.value);
+        connection.send(
+          JSON.stringify({ type: "chat", text: messageInput.value }),
+        );
         messageInput.value = "";
       });
+
+      // ── Heartbeat (client side) ──────────────────────────────
+      // The browser already answers the SERVER's pings automatically, but
+      // JS can't see those or send its own ping frames. So to find out
+      // whether the SERVER is alive, we ping at the application level.
+      function startHeartbeat(ws) {
+        stopHeartbeat();
+        pingTimer = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: "ping" }));
+          pongTimer = setTimeout(() => {
+            console.warn("No pong from server — treating connection as dead");
+            dropConnection(ws);
+            scheduleReconnect();
+          }, PONG_TIMEOUT);
+        }, PING_EVERY);
+      }
+
+      function stopHeartbeat() {
+        clearInterval(pingTimer);
+        clearTimeout(pongTimer);
+      }
+
+      // Detach handlers first so the old socket's onclose (which may fire
+      // much later on a dead network) can't trigger a second reconnect.
+      function dropConnection(ws) {
+        stopHeartbeat();
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+        ws.close();
+        if (connection === ws) connection = null;
+      }
     </script>
   </body>
 </html>
